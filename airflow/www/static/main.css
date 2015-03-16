@@ -33,13 +33,21 @@ input#execution_date {
 }
 table.highlighttable{
     width: 100%;
+    table-layout:fixed;
 }
 div.linenodiv {
     padding-right: 1px !important;
 }
 .linenos {
-    width: 30px;
+    width: 43px;
     border: none;
+}
+div.linenodiv  pre {
+    padding-left: 4px;
+    padding-right: 4px;
+    color: #AAA;
+    background-color: #FCFCFC;
+    text-align:right;
 }
 
 pre {

@@ -126,7 +126,7 @@ admin = Admin(
 
 admin.add_link(
     base.MenuLink(
-        category='Tools',
+        category='Data Profiling',
         name='Ad Hoc Query',
         url='/admin/airflow/query'))
 
@@ -156,7 +156,7 @@ class Airflow(BaseView):
         session = settings.Session()
         dbs = session.query(models.Connection).order_by(
             models.Connection.conn_id)
-        db_choices = [(db.conn_id, db.conn_id) for db in dbs]
+        db_choices = [(db.conn_id, db.conn_id) for db in dbs if db.get_hook()]
         conn_id_str = request.args.get('conn_id')
         csv = request.args.get('csv') == "true"
         sql = request.args.get('sql')
@@ -692,6 +692,7 @@ class Airflow(BaseView):
         task_id = request.args.get('task_id')
         execution_date = request.args.get('execution_date')
         dttm = dateutil.parser.parse(execution_date)
+        form = DateTimeForm(data={'execution_date': dttm})
         dag = dagbag.dags[dag_id]
         task = copy.copy(dag.get_task(task_id))
         ti = models.TaskInstance(task=task, execution_date=dttm)
@@ -699,7 +700,7 @@ class Airflow(BaseView):
             ti.render_templates()
         except Exception as e:
             flash("Error rendering template: " + str(e), "error")
-        title = "{dag_id}.{task_id} [{execution_date}] rendered"
+        title = "Rendered Template"
         html_dict = {}
         for template_field in task.__class__.template_fields:
             content = getattr(task, template_field)
@@ -717,7 +718,10 @@ class Airflow(BaseView):
             'airflow/dag_code.html',
             html_dict=html_dict,
             dag=dag,
-            title=title.format(**locals()))
+            task_id=task_id,
+            execution_date=execution_date,
+            form=form,
+            title=title,)
 
     @expose('/log')
     def log(self):
@@ -738,6 +742,8 @@ class Airflow(BaseView):
         ti = session.query(TI).filter(
             TI.dag_id == dag_id, TI.task_id == task_id,
             TI.execution_date == dttm).first()
+        dttm = dateutil.parser.parse(execution_date)
+        form = DateTimeForm(data={'execution_date': dttm})
         if ti:
             host = ti.hostname
             if socket.gethostname() == host:
@@ -763,15 +769,22 @@ class Airflow(BaseView):
             session.commit()
             session.close()
 
-        title = "Logs for {task_id} on {execution_date}".format(**locals())
+        title = "Log"
 
         return self.render(
-            'airflow/dag_code.html', code=log, dag=dag, title=title)
+            'airflow/dag_code.html',
+            code=log, dag=dag, title=title, task_id=task_id,
+            execution_date=execution_date, form=form)
 
     @expose('/task')
     def task(self):
         dag_id = request.args.get('dag_id')
         task_id = request.args.get('task_id')
+        # Carrying execution_date through, even though it's irrelevant for
+        # this context
+        execution_date = request.args.get('execution_date')
+        dttm = dateutil.parser.parse(execution_date)
+        form = DateTimeForm(data={'execution_date': dttm})
         dag = dagbag.dags[dag_id]
         task = dag.get_task(task_id)
         task = copy.copy(task)
@@ -785,8 +798,7 @@ class Airflow(BaseView):
                         attr_name not in special_attrs:
                     attributes.append((attr_name, str(attr)))
 
-        title = "Task Details for {task_id}".format(**locals())
-
+        title = "Task Details"
         # Color coding the special attributes that are code
         special_attrs_rendered = {}
         for attr_name in special_attrs:
@@ -801,7 +813,10 @@ class Airflow(BaseView):
         return self.render(
             'airflow/task.html',
             attributes=attributes,
+            task_id=task_id,
+            execution_date=execution_date,
             special_attrs_rendered=special_attrs_rendered,
+            form=form,
             dag=dag, title=title)
 
     @expose('/action')
@@ -1219,14 +1234,12 @@ class JobModelView(ModelViewOnly):
         'job_type', 'dag_id', 'state',
         'unixname', 'hostname', 'start_date', 'end_date', 'latest_heartbeat')
 mv = JobModelView(jobs.BaseJob, Session, name="Jobs", category="Browse")
-
 admin.add_view(mv)
 
 
 class LogModelView(ModelViewOnly):
     column_default_sort = ('dttm', True)
     column_filters = ('dag_id', 'task_id', 'execution_date')
-
 mv = LogModelView(
     models.Log, Session, name="Logs", category="Browse")
 admin.add_view(mv)
@@ -1245,6 +1258,8 @@ class TaskInstanceModelView(ModelViewOnly):
 mv = TaskInstanceModelView(
     models.TaskInstance, Session, name="Task Instances", category="Browse")
 admin.add_view(mv)
+
+
 
 admin.add_link(
     base.MenuLink(
@@ -1282,14 +1297,6 @@ mv = UserModelView(models.User, Session, name="Users", category="Admin")
 admin.add_view(mv)
 
 
-class DagModelView(ModelView):
-    column_list = ('dag_id', 'is_paused')
-    column_editable_list = ('is_paused',)
-mv = DagModelView(
-    models.DAG, Session, name="Pause DAGs", category="Admin")
-admin.add_view(mv)
-
-
 class ReloadTaskView(BaseView):
     @expose('/')
     def index(self):
@@ -1298,6 +1305,14 @@ class ReloadTaskView(BaseView):
         dagbag.merge_dags()
         return redirect(url_for('index'))
 admin.add_view(ReloadTaskView(name='Reload DAGs', category="Admin"))
+
+
+class DagModelView(ModelView):
+    column_list = ('dag_id', 'is_paused')
+    column_editable_list = ('is_paused',)
+mv = DagModelView(
+    models.DAG, Session, name="Pause DAGs", category="Admin")
+admin.add_view(mv)
 
 
 def label_link(v, c, m, p):
@@ -1403,7 +1418,7 @@ class ChartModelView(LoginMixin, ModelView):
 
 mv = ChartModelView(
     models.Chart, Session,
-    name="Charts", category="Tools")
+    name="Charts", category="Data Profiling")
 admin.add_view(mv)
 
 admin.add_link(
@@ -1416,3 +1431,28 @@ admin.add_link(
         category='Docs',
         name='Github',
         url='https://github.com/mistercrunch/Airflow'))
+
+
+class KnowEventView(LoginMixin, ModelView):
+    form_columns = (
+        'label',
+        'event_type',
+        'start_date',
+        'end_date',
+        'reported_by',
+        'description')
+    column_list = (
+        'label', 'event_type', 'start_date', 'end_date', 'reported_by')
+mv = KnowEventView(
+    models.KnownEvent, Session, name="Known Events", category="Data Profiling")
+admin.add_view(mv)
+
+
+class KnowEventTypeView(LoginMixin, ModelView):
+    pass
+'''
+mv = KnowEventTypeView(
+    models.KnownEventType,
+    Session, name="Known Event Types", category="Manage")
+admin.add_view(mv)
+'''

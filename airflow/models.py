@@ -90,14 +90,8 @@ class DagBag(object):
         Given a path to a python module, this method imports the module and
         look for dag objects whithin it.
         """
-        if not os.path.isfile(filepath):
-            logging.error("File not found: " + filepath)
-            return
-        mod_name, file_ext = os.path.splitext(os.path.split(filepath)[-1])
         dttm = datetime.fromtimestamp(os.path.getmtime(filepath))
-
-        if file_ext != '.py':
-            return
+        mod_name, file_ext = os.path.splitext(os.path.split(filepath)[-1])
 
         # Skip file if no obvious references to airflow or DAG are found.
         if safe_mode:
@@ -137,14 +131,32 @@ class DagBag(object):
         """
         Given a file path or a folder, this file looks for python modules,
         imports them and adds them to the dagbag collection.
+
+        Note that if a .airflowignore file is found while processing,
+        the directory, it will behaves much like a .gitignore does,
+        ignoring files that match any of the regex patterns specified
+        in the file.
         """
         if os.path.isfile(dag_folder):
             self.process_file(dag_folder)
         elif os.path.isdir(dag_folder):
+            patterns = []
             for root, dirs, files in os.walk(dag_folder):
+                ignore_file = [f for f in files if f == '.airflowignore']
+                if ignore_file:
+                    f = open(os.path.join(root, ignore_file[0]), 'r')
+                    patterns += [p for p in f.read().split('\n') if p]
+                    f.close()
                 for f in files:
-                    filepath = root + '/' + f
-                    self.process_file(filepath)
+                    filepath = os.path.join(root, f)
+                    if not os.path.isfile(filepath):
+                        continue
+                    mod_name, file_ext = os.path.splitext(
+                        os.path.split(filepath)[-1])
+                    if file_ext != '.py':
+                        continue
+                    if not any([re.findall(p, filepath) for p in patterns]):
+                        self.process_file(filepath)
 
     def merge_dags(self):
         session = settings.Session()
@@ -228,10 +240,12 @@ class Connection(Base):
             return hooks.MySqlHook(mysql_conn_id=self.conn_id)
         elif self.conn_type == 'postgres':
             return hooks.PostgresHook(postgres_conn_id=self.conn_id)
-        elif self.conn_type == 'hive':
-            return hooks.HiveHook(hive_conn_id=self.conn_id)
+        elif self.conn_type == 'hive_cli':
+            return hooks.HiveCliHook(hive_cli_conn_id=self.conn_id)
         elif self.conn_type == 'presto':
             return hooks.PrestoHook(presto_conn_id=self.conn_id)
+        elif self.conn_type == 'hiveserver2':
+            return hooks.HiveServer2Hook(hiveserver2_conn_id=self.conn_id)
 
     def __repr__(self):
         return self.conn_id
@@ -1443,3 +1457,28 @@ class Chart(Base):
     db = relationship("Connection")
     iteration_no = Column(Integer, default=0)
     last_modified = Column(DateTime, default=datetime.now())
+
+
+class KnownEventType(Base):
+    __tablename__ = "known_event_type"
+
+    id = Column(Integer, primary_key=True)
+    know_event_type = Column(String(200))
+
+    def __repr__(self):
+        return self.know_event_type
+
+class KnownEvent(Base):
+    __tablename__ = "known_event"
+
+    id = Column(Integer, primary_key=True)
+    label = Column(String(200))
+    start_date = Column(DateTime)
+    end_date = Column(DateTime)
+    user_id = Column(Integer(), ForeignKey('user.id'),)
+    known_event_type_id = Column(Integer(), ForeignKey('known_event_type.id'),)
+    reported_by = relationship(
+        "User", cascade=False, cascade_backrefs=False, backref='known_events')
+    event_type = relationship(
+        "KnownEventType", cascade=False, cascade_backrefs=False, backref='known_events')
+    description = Column(Text)
