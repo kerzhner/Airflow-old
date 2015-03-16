@@ -15,7 +15,6 @@ from flask.ext.admin.form import DateTimePickerWidget
 from flask.ext.admin import base
 from flask.ext.admin.contrib.sqla import ModelView
 from flask.ext.cache import Cache
-from flask.ext.login import current_user
 from flask import request
 import sqlalchemy as sqla
 from wtforms import Form, DateTimeField, SelectField, TextAreaField
@@ -143,8 +142,7 @@ class Airflow(BaseView):
         whitelisted_views = [url_for('airflow.noaccess'), url_for('airflow.login')]
         if (request.path and request.path in whitelisted_views):
             is_whitelisted = True
-        if not is_whitelisted and AUTHENTICATE_ALL_ENDPOINTS and not current_user.is_authenticated():
-            print "Hit the redirect"
+        if not is_whitelisted and AUTHENTICATE_ALL_ENDPOINTS and not flask_login.current_user.is_authenticated():
             return redirect(url_for('airflow.noaccess'))
 
     @expose('/')
