@@ -115,7 +115,9 @@ class HomeView(AdminIndexView):
     """
     @expose("/")
     def index(self):
-        dags = sorted(dagbag.dags.values(), key=lambda dag: dag.dag_id)
+        dags = dagbag.dags.values()
+        dags = [dag for dag in dags if not dag.parent_dag]
+        dags = sorted(dags, key=lambda dag: dag.dag_id)
         return self.render('airflow/dags.html', dags=dags)
 
 admin = Admin(
@@ -715,7 +717,7 @@ class Airflow(BaseView):
                     "<pre><code>" + content + "</pre></code>")
 
         return self.render(
-            'airflow/dag_code.html',
+            'airflow/ti_code.html',
             html_dict=html_dict,
             dag=dag,
             task_id=task_id,
@@ -772,7 +774,7 @@ class Airflow(BaseView):
         title = "Log"
 
         return self.render(
-            'airflow/dag_code.html',
+            'airflow/ti_code.html',
             code=log, dag=dag, title=title, task_id=task_id,
             execution_date=execution_date, form=form)
 
@@ -996,6 +998,7 @@ class Airflow(BaseView):
                 'id': task.task_id,
                 'value': {
                     'label': task.task_id,
+                    'labelStyle': "fill:{0};".format(task.ui_fgcolor),
                     'style': "fill:{0};".format(task.ui_color),
                 }
             })
@@ -1304,7 +1307,7 @@ class ReloadTaskView(BaseView):
     @expose('/')
     def index(self):
         logging.info("Reloading the dags")
-        dagbag.collect_dags()
+        dagbag.collect_dags(only_if_updated=False)
         dagbag.merge_dags()
         return redirect(url_for('index'))
 admin.add_view(ReloadTaskView(name='Reload DAGs', category="Admin"))
