@@ -19,7 +19,6 @@ defaults = {
         'job_heartbeat_sec': 5,
         'master_heartbeat_sec': 60,
         'authenticate': False,
-        'authenticate_all_endpoints': False
     },
 }
 

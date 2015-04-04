@@ -51,7 +51,6 @@ special_attrs = {
 }
 
 AUTHENTICATE = conf.getboolean('master', 'AUTHENTICATE')
-AUTHENTICATE_ALL_ENDPOINTS = conf.getboolean('master', 'AUTHENTICATE_ALL_ENDPOINTS')
 if AUTHENTICATE is False:
     login_required = lambda x: x
 
@@ -137,15 +136,6 @@ class Airflow(BaseView):
 
     def is_visible(self):
         return False
-
-    @app.before_request
-    def check_valid_login():
-        is_whitelisted = False
-        whitelisted_views = [url_for('airflow.noaccess'), url_for('airflow.login')]
-        if (request.path and request.path in whitelisted_views):
-            is_whitelisted = True
-        if not is_whitelisted and AUTHENTICATE_ALL_ENDPOINTS and not flask_login.current_user.is_authenticated():
-            return redirect(url_for('airflow.noaccess'))
 
     @expose('/')
     def index(self):
@@ -653,7 +643,6 @@ class Airflow(BaseView):
             'hadoop_user.engineering.airbnb.com',
             'analytics.engineering.airbnb.com',
             'nerds.engineering.airbnb.com',
-            'sputnik.yahoo.com'
         ]
         if 'X-Internalauth-Username' not in request.headers:
             return redirect(url_for('airflow.noaccess'))
