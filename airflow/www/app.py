@@ -4,10 +4,8 @@ import dateutil.parser
 import json
 import logging
 import os
-import re
 import socket
 import sys
-import urllib2
 
 from flask import Flask, url_for, Markup, Blueprint, redirect, flash, Response
 from flask.ext.admin import Admin, BaseView, expose, AdminIndexView
@@ -28,18 +26,58 @@ import markdown
 import chartkick
 
 import airflow
+login_required = airflow.login.login_required
+current_user = airflow.login.current_user
+logout_user = airflow.login.logout_user
+
 from airflow.settings import Session
 from airflow import jobs
 from airflow import models
+from airflow import login
 from airflow.models import State
 from airflow import settings
 from airflow.configuration import conf
 from airflow import utils
 from airflow.www import utils as wwwutils
 
-from airflow.www.login import login_manager
-import flask_login
-from flask_login import login_required
+from functools import wraps
+
+AUTHENTICATE = conf.getboolean('master', 'AUTHENTICATE')
+if AUTHENTICATE is False:
+    login_required = lambda x: x
+
+
+def superuser_required(f):
+    '''
+    Decorator for views requiring superuser access
+    '''
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if (
+            not AUTHENTICATE or
+            (not current_user.is_anonymous() and current_user.is_superuser())
+        ):
+            return f(*args, **kwargs)
+        else:
+            flash("This page requires superuser priviledges", "error")
+            return redirect(url_for('admin.index'))
+    return decorated_function
+
+def data_profiling_required(f):
+    '''
+    Decorator for views requiring data profiling access
+    '''
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if (
+            not AUTHENTICATE or
+            (not current_user.is_anonymous() and current_user.data_profiling())
+        ):
+            return f(*args, **kwargs)
+        else:
+            flash("This page requires data profiling priviledges", "error")
+            return redirect(url_for('admin.index'))
+    return decorated_function
 
 QUERY_LIMIT = 100000
 CHART_LIMIT = 200000
@@ -50,9 +88,6 @@ special_attrs = {
     'bash_command': BashLexer,
 }
 
-AUTHENTICATE = conf.getboolean('master', 'AUTHENTICATE')
-if AUTHENTICATE is False:
-    login_required = lambda x: x
 
 dagbag = models.DagBag(os.path.expanduser(conf.get('core', 'DAGS_FOLDER')))
 utils.pessimistic_connection_handling()
@@ -60,7 +95,7 @@ utils.pessimistic_connection_handling()
 app = Flask(__name__)
 app.config['SQLALCHEMY_POOL_RECYCLE'] = 3600
 
-login_manager.init_app(app)
+login.login_manager.init_app(app)
 app.secret_key = 'airflowified'
 
 cache = Cache(
@@ -113,6 +148,7 @@ class HomeView(AdminIndexView):
     Basic home view, just showing the README.md file
     """
     @expose("/")
+    @login_required
     def index(self):
         dags = dagbag.dags.values()
         dags = [dag for dag in dags if not dag.parent_dag]
@@ -125,12 +161,6 @@ admin = Admin(
     index_view=HomeView(name='DAGs'),
     template_mode='bootstrap3')
 
-admin.add_link(
-    base.MenuLink(
-        category='Data Profiling',
-        name='Ad Hoc Query',
-        url='/admin/airflow/query'))
-
 
 class Airflow(BaseView):
 
@@ -138,73 +168,12 @@ class Airflow(BaseView):
         return False
 
     @expose('/')
+    @login_required
     def index(self):
         return self.render('airflow/dags.html')
 
-    @expose('/query')
-    @login_required
-    @wwwutils.gzipped
-    def query(self):
-        session = settings.Session()
-        dbs = session.query(models.Connection).order_by(
-            models.Connection.conn_id)
-        db_choices = [(db.conn_id, db.conn_id) for db in dbs if db.get_hook()]
-        conn_id_str = request.args.get('conn_id')
-        csv = request.args.get('csv') == "true"
-        sql = request.args.get('sql')
-
-        class QueryForm(Form):
-            conn_id = SelectField("Layout", choices=db_choices)
-            sql = TextAreaField("SQL", widget=wwwutils.AceEditorWidget())
-        data = {
-            'conn_id': conn_id_str,
-            'sql': sql,
-        }
-        results = None
-        has_data = False
-        error = False
-        if conn_id_str:
-            db = [db for db in dbs if db.conn_id == conn_id_str][0]
-            hook = db.get_hook()
-            try:
-                df = hook.get_pandas_df(wwwutils.limit_sql(sql, QUERY_LIMIT))
-                # df = hook.get_pandas_df(sql)
-                has_data = len(df) > 0
-                df = df.fillna('')
-                results = df.to_html(
-                    classes="table table-bordered table-striped no-wrap",
-                    index=False,
-                    na_rep='',
-                ) if has_data else ''
-            except Exception as e:
-                flash(str(e), 'error')
-                error = True
-
-        if has_data and len(df) == QUERY_LIMIT:
-            flash(
-                "Query output truncated at " + str(QUERY_LIMIT) +
-                " rows", 'info')
-
-        if not has_data and error:
-            flash('No data', 'error')
-
-        if csv:
-            return Response(
-                response=df.to_csv(index=False),
-                status=200,
-                mimetype="application/text")
-
-        form = QueryForm(request.form, data=data)
-        session.commit()
-        session.close()
-        return self.render(
-            'airflow/query.html', form=form,
-            title="Ad Hoc Query",
-            results=results or '',
-            has_data=has_data)
-
     @expose('/chart_data')
-    @login_required
+    @data_profiling_required
     @wwwutils.gzipped
     @cache.cached(timeout=3600, key_prefix=wwwutils.make_cache_key)
     def chart_data(self):
@@ -471,9 +440,8 @@ class Airflow(BaseView):
             status=200,
             mimetype="application/json")
 
-
     @expose('/chart')
-    @login_required
+    @data_profiling_required
     def chart(self):
         session = settings.Session()
         chart_id = request.args.get('chart_id')
@@ -498,6 +466,7 @@ class Airflow(BaseView):
             label=chart.label)
 
     @expose('/dag_stats')
+    @login_required
     def dag_stats(self):
         states = [State.SUCCESS, State.RUNNING, State.FAILED]
         task_ids = []
@@ -538,6 +507,7 @@ class Airflow(BaseView):
             status=200, mimetype="application/json")
 
     @expose('/code')
+    @login_required
     def code(self):
         dag_id = request.args.get('dag_id')
         dag = dagbag.dags[dag_id]
@@ -549,6 +519,7 @@ class Airflow(BaseView):
             'airflow/dag_code.html', html_code=html_code, dag=dag, title=title)
 
     @expose('/circles')
+    @login_required
     def circles(self):
         return self.render(
             'airflow/circles.html')
@@ -571,33 +542,6 @@ class Airflow(BaseView):
             'airflow/code.html',
             code_html=code_html, title=title, subtitle=cfg_loc)
 
-    @expose('/conf')
-    @login_required
-    def conf(self):
-        from airflow import configuration
-        raw = request.args.get('raw') == "true"
-        title = "Airflow Configuration"
-        subtitle = configuration.AIRFLOW_CONFIG
-        f = open(configuration.AIRFLOW_CONFIG, 'r')
-        config = f.read()
-
-        f.close()
-        if raw:
-            return Response(
-                response=config,
-                status=200,
-                mimetype="application/text")
-        else:
-            code_html = Markup(highlight(
-                config,
-                IniLexer(),  # Lexer call
-                HtmlFormatter(noclasses=True))
-            )
-            return self.render(
-                'airflow/code.html',
-                pre_subtitle=settings.HEADER + "  v" + airflow.__version__,
-                code_html=code_html, title=title, subtitle=subtitle)
-
     @expose('/noaccess')
     def noaccess(self):
         return self.render('airflow/noaccess.html')
@@ -609,7 +553,7 @@ class Airflow(BaseView):
         session = settings.Session()
         latest_heartbeat = session.query(
             sqla.func.max(J.latest_heartbeat)).filter(
-                J.job_type=='MasterJob').first()[0]
+                J.job_type == 'MasterJob').first()[0]
         session.commit()
         session.close()
         ago = (datetime.now() - latest_heartbeat).total_seconds()
@@ -631,53 +575,26 @@ class Airflow(BaseView):
     @expose('/headers')
     def headers(self):
         d = {k: v for k, v in request.headers}
+        if hasattr(current_user, 'is_superuser'):
+            d['is_superuser'] = current_user.is_superuser()
+            d['data_profiling'] = current_user.data_profiling()
+            d['is_anonymous'] = current_user.is_anonymous()
+            d['is_authenticated'] = current_user.is_authenticated()
         return Response(
             response=json.dumps(d, indent=4),
             status=200, mimetype="application/json")
 
     @expose('/login')
     def login(self):
-        session = settings.Session()
-        roles = [
-            'airpal_topsecret.engineering.airbnb.com',
-            'hadoop_user.engineering.airbnb.com',
-            'analytics.engineering.airbnb.com',
-            'nerds.engineering.airbnb.com',
-        ]
-        if 'X-Internalauth-Username' not in request.headers:
-            return redirect(url_for('airflow.noaccess'))
-        username = request.headers.get('X-Internalauth-Username')
-        groups = request.headers.get(
-            'X-Internalauth-Groups').lower().split(',')
-        has_access = any([g in roles for g in groups])
-
-        d = {k: v for k, v in request.headers}
-        cookie = urllib2.unquote(d.get('Cookie', ''))
-        mailsrch = re.compile(
-            r'[\w\-][\w\-\.]+@[\w\-][\w\-\.]+[a-zA-Z]{1,4}')
-        res = mailsrch.findall(cookie)
-        email = res[0] if res else ''
-
-        if has_access:
-            user = session.query(models.User).filter(
-                models.User.username == username).first()
-            if not user:
-                user = models.User(username=username)
-            user.email = email
-            session.merge(user)
-            session.commit()
-            flask_login.login_user(user)
-            session.commit()
-            session.close()
-            return redirect(request.args.get("next") or url_for("index"))
-        return redirect('/')
+        return login.login(self, request)
 
     @expose('/logout')
     def logout(self):
-        flask_login.logout_user()
+        logout_user()
         return redirect('/admin')
 
     @expose('/rendered')
+    @login_required
     def rendered(self):
         dag_id = request.args.get('dag_id')
         task_id = request.args.get('task_id')
@@ -715,6 +632,7 @@ class Airflow(BaseView):
             title=title,)
 
     @expose('/log')
+    @login_required
     def log(self):
         BASE_LOG_FOLDER = os.path.expanduser(
             conf.get('core', 'BASE_LOG_FOLDER'))
@@ -768,6 +686,7 @@ class Airflow(BaseView):
             execution_date=execution_date, form=form)
 
     @expose('/task')
+    @login_required
     def task(self):
         dag_id = request.args.get('dag_id')
         task_id = request.args.get('task_id')
@@ -811,62 +730,50 @@ class Airflow(BaseView):
             dag=dag, title=title)
 
     @expose('/action')
+    @login_required
     def action(self):
-        session = settings.Session()
         action = request.args.get('action')
         dag_id = request.args.get('dag_id')
+        task_id = request.args.get('task_id')
         origin = request.args.get('origin')
         dag = dagbag.dags[dag_id]
+        task = dag.get_task(task_id)
+
+        execution_date = request.args.get('execution_date')
+        execution_date = dateutil.parser.parse(execution_date)
+        confirmed = request.args.get('confirmed') == "true"
+        upstream = request.args.get('upstream') == "true"
+        downstream = request.args.get('downstream') == "true"
 
         if action == 'clear':
-            task_id = request.args.get('task_id')
-            task = dag.get_task(task_id)
-            execution_date = request.args.get('execution_date')
-            execution_date = dateutil.parser.parse(execution_date)
             future = request.args.get('future') == "true"
             past = request.args.get('past') == "true"
-            upstream = request.args.get('upstream') == "true"
-            downstream = request.args.get('downstream') == "true"
-            confirmed = request.args.get('confirmed') == "true"
 
+            dag = dag.sub_dag(
+                task_regex=r"^{0}$".format(task_id),
+                include_downstream=downstream,
+                include_upstream=upstream)
+
+            end_date = execution_date if not future else None
+            start_date = execution_date if not past else None
             if confirmed:
-                end_date = execution_date if not future else None
-                start_date = execution_date if not past else None
 
-                count = task.clear(
+                count = dag.clear(
                     start_date=start_date,
-                    end_date=end_date,
-                    upstream=upstream,
-                    downstream=downstream)
+                    end_date=end_date)
 
                 flash("{0} task instances have been cleared".format(count))
                 return redirect(origin)
             else:
-                TI = models.TaskInstance
-                qry = session.query(TI).filter(TI.dag_id == dag_id)
-
-                if not future:
-                    qry = qry.filter(TI.execution_date <= execution_date)
-                if not past:
-                    qry = qry.filter(TI.execution_date >= execution_date)
-
-                tasks = [task_id]
-
-                if upstream:
-                    tasks += [
-                        t.task_id
-                        for t in task.get_flat_relatives(upstream=True)]
-                if downstream:
-                    tasks += [
-                        t.task_id
-                        for t in task.get_flat_relatives(upstream=False)]
-
-                qry = qry.filter(TI.task_id.in_(tasks))
-                if not qry.count():
+                tis = dag.clear(
+                    start_date=start_date,
+                    end_date=end_date,
+                    dry_run=True)
+                if not tis:
                     flash("No task instances to clear", 'error')
                     response = redirect(origin)
                 else:
-                    details = "\n".join([str(t) for t in qry])
+                    details = "\n".join([str(t) for t in tis])
 
                     response = self.render(
                         'airflow/confirm.html',
@@ -875,11 +782,72 @@ class Airflow(BaseView):
                             "to clear:"),
                         details=details,)
 
+                return response
+        elif action == 'success':
+            # Flagging tasks as successful
+            session = settings.Session()
+            task_ids = [task_id]
+            if downstream:
+                task_ids += [
+                    t.task_id
+                    for t in task.get_flat_relatives(upstream=False)]
+            if upstream:
+                task_ids += [
+                    t.task_id
+                    for t in task.get_flat_relatives(upstream=True)]
+            TI = models.TaskInstance
+            tis = session.query(TI).filter(
+                TI.dag_id==dag_id,
+                TI.execution_date==execution_date,
+                TI.task_id.in_(task_ids)).all()
+
+            if confirmed:
+
+                updated_task_ids = []
+                for ti in tis:
+                    updated_task_ids.append(ti.task_id)
+                    ti.state = State.SUCCESS
+
+                session.commit()
+
+                to_insert = list(set(task_ids) - set(updated_task_ids))
+                for task_id in to_insert:
+                    ti = TI(
+                        task=dag.get_task(task_id),
+                        execution_date=execution_date,
+                        state=State.SUCCESS)
+                    session.add(ti)
+                    session.commit()
+
                 session.commit()
                 session.close()
+                flash("Marked success on {} task instances".format(
+                    len(task_ids)))
+
+                return redirect(origin)
+            else:
+                if not task_ids:
+                    flash("No task instances to mark as successful", 'error')
+                    response = redirect(origin)
+                else:
+                    tis = []
+                    for task_id in task_ids:
+                        tis.append(TI(
+                            task=dag.get_task(task_id),
+                            execution_date=execution_date,
+                            state=State.SUCCESS))
+                    details = "\n".join([str(t) for t in tis])
+
+                    response = self.render(
+                        'airflow/confirm.html',
+                        message=(
+                            "Here's the list of task instances you are about "
+                            "to mark as successful:"),
+                        details=details,)
                 return response
 
     @expose('/tree')
+    @login_required
     @wwwutils.gzipped
     def tree(self):
         dag_id = request.args.get('dag_id')
@@ -944,7 +912,9 @@ class Airflow(BaseView):
                 'start_date': task.start_date,
                 'end_date': task.end_date,
                 'depends_on_past': task.depends_on_past,
+                'ui_color': task.ui_color,
             }
+
         if len(dag.roots) > 1:
             # d3 likes a single root
             data = {
@@ -952,8 +922,11 @@ class Airflow(BaseView):
                 'instances': [],
                 'children': [recurse_nodes(t) for t in dag.roots]
             }
-        else:
+        elif len(dag.roots) == 1:
             data = recurse_nodes(dag.roots[0])
+        else:
+            flash("No tasks found.", "error")
+            data = []
 
         data = json.dumps(data, indent=4, default=utils.json_ser)
         session.commit()
@@ -964,6 +937,7 @@ class Airflow(BaseView):
             dag=dag, data=data)
 
     @expose('/graph')
+    @login_required
     def graph(self):
         session = settings.Session()
         dag_id = request.args.get('dag_id')
@@ -1021,6 +995,8 @@ class Airflow(BaseView):
             t.task_id: utils.alchemy_to_dict(t)
             for t in dag.tasks
         }
+        if not tasks:
+            flash("No tasks found", "error")
         session.commit()
         session.close()
 
@@ -1036,6 +1012,7 @@ class Airflow(BaseView):
             edges=json.dumps(edges, indent=2),)
 
     @expose('/duration')
+    @login_required
     def duration(self):
         session = settings.Session()
         dag_id = request.args.get('dag_id')
@@ -1067,6 +1044,7 @@ class Airflow(BaseView):
         )
 
     @expose('/landing_times')
+    @login_required
     def landing_times(self):
         session = settings.Session()
         dag_id = request.args.get('dag_id')
@@ -1099,6 +1077,7 @@ class Airflow(BaseView):
         )
 
     @expose('/gantt')
+    @login_required
     def gantt(self):
 
         session = settings.Session()
@@ -1167,18 +1146,96 @@ class Airflow(BaseView):
 
 admin.add_view(Airflow(name='DAGs'))
 
-# ------------------------------------------------
-# Leveraging the admin for CRUD and browse on models
-# ------------------------------------------------
-
 
 class LoginMixin(object):
     def is_accessible(self):
-        return AUTHENTICATE is False or \
-            flask_login.current_user.is_authenticated()
+        return (
+            not AUTHENTICATE or
+            (not current_user.is_anonymous() and current_user.is_authenticated())
+        )
 
 
-class ModelViewOnly(ModelView):
+class DataProfilingMixin(object):
+    def is_accessible(self):
+        return (
+            not AUTHENTICATE or
+            (not current_user.is_anonymous() and current_user.data_profiling())
+        )
+
+
+class SuperUserMixin(object):
+    def is_accessible(self):
+        return (
+            not AUTHENTICATE or
+            (not current_user.is_anonymous() and current_user.is_superuser())
+        )
+
+
+class QueryView(DataProfilingMixin, BaseView):
+    @expose('/')
+    @wwwutils.gzipped
+    def query(self):
+        session = settings.Session()
+        dbs = session.query(models.Connection).order_by(
+            models.Connection.conn_id)
+        db_choices = [(db.conn_id, db.conn_id) for db in dbs if db.get_hook()]
+        conn_id_str = request.args.get('conn_id')
+        csv = request.args.get('csv') == "true"
+        sql = request.args.get('sql')
+
+        class QueryForm(Form):
+            conn_id = SelectField("Layout", choices=db_choices)
+            sql = TextAreaField("SQL", widget=wwwutils.AceEditorWidget())
+        data = {
+            'conn_id': conn_id_str,
+            'sql': sql,
+        }
+        results = None
+        has_data = False
+        error = False
+        if conn_id_str:
+            db = [db for db in dbs if db.conn_id == conn_id_str][0]
+            hook = db.get_hook()
+            try:
+                df = hook.get_pandas_df(wwwutils.limit_sql(sql, QUERY_LIMIT))
+                # df = hook.get_pandas_df(sql)
+                has_data = len(df) > 0
+                df = df.fillna('')
+                results = df.to_html(
+                    classes="table table-bordered table-striped no-wrap",
+                    index=False,
+                    na_rep='',
+                ) if has_data else ''
+            except Exception as e:
+                flash(str(e), 'error')
+                error = True
+
+        if has_data and len(df) == QUERY_LIMIT:
+            flash(
+                "Query output truncated at " + str(QUERY_LIMIT) +
+                " rows", 'info')
+
+        if not has_data and error:
+            flash('No data', 'error')
+
+        if csv:
+            return Response(
+                response=df.to_csv(index=False),
+                status=200,
+                mimetype="application/text")
+
+        form = QueryForm(request.form, data=data)
+        session.commit()
+        session.close()
+        return self.render(
+            'airflow/query.html', form=form,
+            title="Ad Hoc Query",
+            results=results or '',
+            has_data=has_data)
+admin.add_view(QueryView(name='Ad Hoc Query', category="Data Profiling"))
+
+
+class ModelViewOnly(LoginMixin, ModelView):
     """
     Modifying the base ModelView class for non edit, browse only operations
     """
@@ -1201,11 +1258,12 @@ def log_link(v, c, m, p):
         '</span></a>').format(**locals())
 
 
-def task_link(v, c, m, p):
+def task_instance_link(v, c, m, p):
     url = url_for(
         'airflow.task',
         dag_id=m.dag_id,
-        task_id=m.task_id)
+        task_id=m.task_id,
+        execution_date=m.execution_date.isoformat())
     return Markup(
         '<a href="{url}">{m.task_id}</a>'.format(**locals()))
 
@@ -1244,7 +1302,8 @@ class TaskInstanceModelView(ModelViewOnly):
     column_filters = ('dag_id', 'task_id', 'state', 'execution_date')
     named_filter_urls = True
     column_formatters = dict(
-        log=log_link, task_id=task_link, dag_id=dag_link, duration=duration_f)
+        log=log_link, task_id=task_instance_link,
+        dag_id=dag_link, duration=duration_f)
     column_searchable_list = ('dag_id', 'task_id', 'state')
     column_list = (
         'dag_id', 'task_id', 'execution_date',
@@ -1255,15 +1314,7 @@ mv = TaskInstanceModelView(
 admin.add_view(mv)
 
 
-
-admin.add_link(
-    base.MenuLink(
-        category='Admin',
-        name='Configuration',
-        url='/admin/airflow/conf'))
-
-
-class ConnectionModelView(LoginMixin, ModelView):
+class ConnectionModelView(SuperUserMixin, ModelView):
     column_list = ('conn_id', 'conn_type', 'host', 'port')
     form_choices = {
         'conn_type': [
@@ -1286,13 +1337,13 @@ mv = ConnectionModelView(
 admin.add_view(mv)
 
 
-class UserModelView(LoginMixin, ModelView):
+class UserModelView(SuperUserMixin, ModelView):
     column_default_sort = 'username'
 mv = UserModelView(models.User, Session, name="Users", category="Admin")
 admin.add_view(mv)
 
 
-class ReloadTaskView(BaseView):
+class ReloadTaskView(SuperUserMixin, BaseView):
     @expose('/')
     def index(self):
         logging.info("Reloading the dags")
@@ -1302,7 +1353,36 @@ class ReloadTaskView(BaseView):
 admin.add_view(ReloadTaskView(name='Reload DAGs', category="Admin"))
 
 
-class DagModelView(ModelView):
+class ConfigurationView(SuperUserMixin, BaseView):
+    @expose('/')
+    def conf(self):
+        from airflow import configuration
+        raw = request.args.get('raw') == "true"
+        title = "Airflow Configuration"
+        subtitle = configuration.AIRFLOW_CONFIG
+        f = open(configuration.AIRFLOW_CONFIG, 'r')
+        config = f.read()
+
+        f.close()
+        if raw:
+            return Response(
+                response=config,
+                status=200,
+                mimetype="application/text")
+        else:
+            code_html = Markup(highlight(
+                config,
+                IniLexer(),  # Lexer call
+                HtmlFormatter(noclasses=True))
+            )
+            return self.render(
+                'airflow/code.html',
+                pre_subtitle=settings.HEADER + "  v" + airflow.__version__,
+                code_html=code_html, title=title, subtitle=subtitle)
+admin.add_view(ConfigurationView(name='Configuration', category="Admin"))
+
+
+class DagModelView(SuperUserMixin, ModelView):
     column_list = ('dag_id', 'is_paused')
     column_editable_list = ('is_paused',)
 mv = DagModelView(
@@ -1321,7 +1401,7 @@ def label_link(v, c, m, p):
     return Markup("<a href='{url}'>{m.label}</a>".format(**locals()))
 
 
-class ChartModelView(LoginMixin, ModelView):
+class ChartModelView(DataProfilingMixin, ModelView):
     form_columns = (
         'label',
         'owner',
@@ -1407,8 +1487,8 @@ class ChartModelView(LoginMixin, ModelView):
             model.iteration_no = 0
         else:
             model.iteration_no += 1
-        if AUTHENTICATE and not model.user_id and flask_login.current_user:
-            model.user_id = flask_login.current_user.id
+        if AUTHENTICATE and not model.user_id and current_user:
+            model.user_id = current_user.id
         model.last_modified = datetime.now()
 
 mv = ChartModelView(
@@ -1428,7 +1508,7 @@ admin.add_link(
         url='https://github.com/mistercrunch/Airflow'))
 
 
-class KnowEventView(LoginMixin, ModelView):
+class KnowEventView(DataProfilingMixin, ModelView):
     form_columns = (
         'label',
         'event_type',
@@ -1443,7 +1523,7 @@ mv = KnowEventView(
 admin.add_view(mv)
 
 
-class KnowEventTypeView(LoginMixin, ModelView):
+class KnowEventTypeView(DataProfilingMixin, ModelView):
     pass
 '''
 mv = KnowEventTypeView(

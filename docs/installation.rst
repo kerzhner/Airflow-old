@@ -1,49 +1,36 @@
+Installation
+------------
+Setting up the sandbox from the :doc:`start` section was easy, now
+working towards a production grade environment is a bit more work.
 
-Getting Started
----------------
+Extra Packages
+''''''''''''''
+The ``airflow`` PyPI basic package only installs what's needed to get started.
+Subpackages can be installed depending on what will be useful in your 
+environment. For instance, if you don't need connectivity with Postgres,
+you won't have to go through the trouble of install the ``postgres-devel`` yum
+package, or whatever equivalent on the distribution you are using.
 
-Quick Start
-'''''''''''
-The installation is quick and straightforward. 
+Behind the scene, we do conditional imports on operators that require
+these extra dependencies.
 
-.. code-block:: bash
+Here's the list of the subpackages and that they enable:
 
-    # airflow needs a home, ~/airflow is the default, 
-    # but you can lay foundation somewhere else if you prefer
-    # (optional)
-    export AIRFLOW_HOME=~/airflow
-
-    # install from pypi using pip
-    pip install airflow
-
-    # initialize the database
-    airflow initdb
-
-    # start the web server, default port is 8080
-    airflow webserver -p 8080
-
-Upon running these commands, airflow will create the ``$AIRFLOW_HOME`` folder 
-and lay a "airflow.cfg" files with defaults that get you going fast. You can
-inspect the file either in ``$AIRFLOW_HOME/airflow.cfg``, or through the UI in 
-the ``Admin->Configuration`` menu.
-
-Out of the box, airflow uses a sqlite database, which you should outgrow 
-fairly quickly since no parallelization is possible using this database
-backend. It works in conjunction with the ``SequentialExecutor`` which will 
-only run task instances sequentially. While this is very limiting, it allows
-you to get up and running quickly and take a tour of the UI and the 
-command line utilities.
-
-Here are a few commands that will trigger a few task instances. You should
-be able to see the status of the jobs change in the ``example1`` DAG as you 
-run the commands below.
-
-.. code-block:: bash
-
-    # run your first task instance
-    airflow run example1 runme_0 2015-01-01
-    # run a backfill over 2 days
-    airflow backfill example1 -s 2015-01-01 -e 2015-01-02
++-------------+------------------------------------+---------------------------------------+
+| subpackage  |     install command                | enables                               |
++=============+====================================+=======================================+
+|  mysql      |  ``pip install airflow[mysql]``    | MySQL operators and hook, support as  | 
+|             |                                    | an Airflow backend                    |
++-------------+------------------------------------+---------------------------------------+
+|  postgres   |  ``pip install airflow[postgres]`` | Postgres operators and hook, support  | 
+|             |                                    | as an Airflow backend                 |
++-------------+------------------------------------+---------------------------------------+
+|  samba      |  ``pip install airflow[samba]``    | ``Hive2SambaOperator``                |
++-------------+------------------------------------+---------------------------------------+
+|  s3         | ``pip install airflow[s3]``        | ``S3KeySensor``, ``S3PrefixSensor``   |
++-------------+------------------------------------+---------------------------------------+
+|  all        | ``pip install airflow[all]``       | All Airflow features known to man     |
++-------------+------------------------------------+---------------------------------------+
 
 
 Setting up a Backend
@@ -95,3 +82,19 @@ its direction.
 
 Note that you can also run "Celery Flower" a web UI build on top of Celery
 to monitor your workers.
+
+
+Web Authentication
+''''''''''''''''''
+
+By default, all gates are opened. An easy way to restrict access
+to the web application is to do it at the network level, or by using
+ssh tunnels.
+
+However, it is possible to switch on 
+authentication and define exactly how your users should login
+into your Airflow environment. Airflow uses ``flask_login`` and
+exposes a set of hooks in the ``airflow.default_login`` module. You can
+alter the content of this module by overriding it as a ``airflow_login``
+module. To do this, you would typically copy/paste ``airflow.default_login``
+in a ``airflow_login.py`` and put it directly in your ``PYTHONPATH``.

@@ -1,6 +1,7 @@
 *.bkp
 *.egg-info
 *.pyc
+airflow/www/static/coverage/
 .ipynb*
 docs/_*
 airflow.db
@@ -16,4 +17,5 @@ logs
 MANIFEST
 secrets.py
 unittests.cfg
-airflow/www/static/coverage/**
+.DS_Store
+airflow_login.py

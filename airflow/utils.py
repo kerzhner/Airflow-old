@@ -3,8 +3,10 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from functools import wraps
+import imp
 import inspect
 import logging
+import os
 import re
 import smtplib
 
@@ -119,9 +121,11 @@ def initdb():
         session.add(KET(know_event_type='Holiday'))
     if not session.query(KET).filter(KET.know_event_type == 'Outage').first():
         session.add(KET(know_event_type='Outage'))
-    if not session.query(KET).filter(KET.know_event_type == 'Natural Disaster').first():
+    if not session.query(KET).filter(
+            KET.know_event_type == 'Natural Disaster').first():
         session.add(KET(know_event_type='Natural Disaster'))
-    if not session.query(KET).filter(KET.know_event_type == 'Marketing Campain').first():
+    if not session.query(KET).filter(
+            KET.know_event_type == 'Marketing Campain').first():
         session.add(KET(know_event_type='Marketing Campain'))
     session.commit()
     session.close()
@@ -212,13 +216,23 @@ def apply_defaults(func):
             raise Exception(
                 "Use keyword arguments when initializing operators")
         dag_args = {}
+        dag_params = {}
         if 'dag' in kwargs and kwargs['dag']:
             dag = kwargs['dag']
             dag_args = copy(dag.default_args) or {}
+            dag_params = copy(dag.params) or {}
+
+        params = {}
+        if 'params' in kwargs:
+            params = kwargs['params']
+        dag_params.update(params)
 
         default_args = {}
         if 'default_args' in kwargs:
             default_args = kwargs['default_args']
+            if 'params' in default_args:
+                dag_params.update(default_args['params'])
+                del default_args['params']
 
         dag_args.update(default_args)
         default_args = dag_args
@@ -234,6 +248,8 @@ def apply_defaults(func):
         if missing_args:
             msg = "Argument {0} is required".format(missing_args)
             raise Exception(msg)
+
+        kwargs['params'] = dag_params
 
         result = func(*args, **kwargs)
         return result
@@ -257,11 +273,7 @@ def ask_yesno(question):
 
 
 def send_email(to, subject, html_content):
-    SMTP_HOST = conf.get('smtp', 'SMTP_HOST')
     SMTP_MAIL_FROM = conf.get('smtp', 'SMTP_MAIL_FROM')
-    SMTP_PORT = conf.get('smtp', 'SMTP_PORT')
-    SMTP_USER = conf.get('smtp', 'SMTP_USER')
-    SMTP_PASSWORD = conf.get('smtp', 'SMTP_PASSWORD')
 
     if isinstance(to, unicode) or isinstance(to, str):
         if ',' in to:
@@ -277,10 +289,48 @@ def send_email(to, subject, html_content):
     msg['To'] = ", ".join(to)
     mime_text = MIMEText(html_content, 'html')
     msg.attach(mime_text)
+
+    send_MIME_email(SMTP_MAIL_FROM, to, msg)
+
+
+def send_MIME_email(e_from, e_to, mime_msg):
+    SMTP_HOST = conf.get('smtp', 'SMTP_HOST')
+    SMTP_PORT = conf.get('smtp', 'SMTP_PORT')
+    SMTP_USER = conf.get('smtp', 'SMTP_USER')
+    SMTP_PASSWORD = conf.get('smtp', 'SMTP_PASSWORD')
+
     s = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
     s.starttls()
     if SMTP_USER and SMTP_PASSWORD:
         s.login(SMTP_USER, SMTP_PASSWORD)
-    logging.info("Sent an altert email to " + str(to))
-    s.sendmail(SMTP_MAIL_FROM, to, msg.as_string())
+    logging.info("Sent an altert email to " + str(e_to))
+    s.sendmail(e_from, e_to, mime_msg.as_string())
     s.quit()
+
+def import_module_attrs(parent_module_globals, module_attrs_dict):
+    '''
+    Attemps to import a set of modules and specified attributes in the
+    form of a dictionary. The attributes are copied in the parent module's
+    namespace. The function returns a list of attributes names that can be
+    affected to __all__.
+
+    This is used in the context of ``operators`` and ``hooks`` and
+    silence the import errors for when libraries are missing. It makes
+    for a clean package abstracting the underlying modules and only
+    brings funcitonal operators to those namespaces.
+
+    >>> module_attrs = {'operators': ['BashOperator']}
+    >>> import_module_attrs(globals(), module_attrs)
+    '''
+    imported_attrs = []
+    for mod, attrs in module_attrs_dict.items():
+        try:
+            folder = os.path.dirname(parent_module_globals['__file__'])
+            f, filename, description = imp.find_module(mod, [folder])
+            module = imp.load_module(mod, f, filename, description)
+            for attr in attrs:
+                parent_module_globals[attr] = getattr(module, attr)
+                imported_attrs += [attr]
+        except:
+            logging.warning("Couldn't import module " + mod)
+    return imported_attrs

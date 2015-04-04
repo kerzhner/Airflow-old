@@ -13,7 +13,7 @@ import socket
 from sqlalchemy import (
     Column, Integer, String, DateTime, Text, Boolean, ForeignKey, PickleType,
     Index,)
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import relationship
@@ -126,13 +126,10 @@ class DagBag(object):
         '''
         self.dags[dag.dag_id] = dag
         dag.resolve_template_files()
-        for task in dag.tasks:
-            # Late import to prevent circular imports
-            from airflow.operators import SubDagOperator
-            if isinstance(task, SubDagOperator):
-                task.subdag.full_filepath = dag.full_filepath
-                task.subdag.parent_dag = dag
-                self.bag_dag(task.subdag)
+        for subdag in dag.subdags:
+            subdag.full_filepath = dag.full_filepath
+            subdag.parent_dag = dag
+            self.bag_dag(subdag)
         logging.info('Loaded DAG {dag}'.format(**locals()))
 
     def collect_dags(
@@ -186,33 +183,18 @@ class DagBag(object):
         return dag_ids
 
 
-class User(Base):
-    """
-    Eventually should be used for security purposes
-    """
+class BaseUser(Base):
     __tablename__ = "user"
+
     id = Column(Integer, primary_key=True)
     username = Column(String(ID_LEN), unique=True)
     email = Column(String(500))
-
-    def __init__(self, username=None, email=None):
-        self.username = username
-        self.email = email
 
     def __repr__(self):
         return self.username
 
     def get_id(self):
         return unicode(self.id)
-
-    def is_active(self):
-        return True
-
-    def is_authenticated(self):
-        return True
-
-    def is_anonymous(self):
-        return False
 
 
 class Connection(Base):
@@ -248,16 +230,19 @@ class Connection(Base):
 
     def get_hook(self):
         from airflow import hooks
-        if self.conn_type == 'mysql':
-            return hooks.MySqlHook(mysql_conn_id=self.conn_id)
-        elif self.conn_type == 'postgres':
-            return hooks.PostgresHook(postgres_conn_id=self.conn_id)
-        elif self.conn_type == 'hive_cli':
-            return hooks.HiveCliHook(hive_cli_conn_id=self.conn_id)
-        elif self.conn_type == 'presto':
-            return hooks.PrestoHook(presto_conn_id=self.conn_id)
-        elif self.conn_type == 'hiveserver2':
-            return hooks.HiveServer2Hook(hiveserver2_conn_id=self.conn_id)
+        try:
+            if self.conn_type == 'mysql':
+                return hooks.MySqlHook(mysql_conn_id=self.conn_id)
+            elif self.conn_type == 'postgres':
+                return hooks.PostgresHook(postgres_conn_id=self.conn_id)
+            elif self.conn_type == 'hive_cli':
+                return hooks.HiveCliHook(hive_cli_conn_id=self.conn_id)
+            elif self.conn_type == 'presto':
+                return hooks.PrestoHook(presto_conn_id=self.conn_id)
+            elif self.conn_type == 'hiveserver2':
+                return hooks.HiveServer2Hook(hiveserver2_conn_id=self.conn_id)
+        except:
+            return None
 
     def __repr__(self):
         return self.conn_id
@@ -319,10 +304,11 @@ class TaskInstance(Base):
         Index('ti_state_lkp', dag_id, task_id, execution_date, state),
     )
 
-    def __init__(self, task, execution_date, job=None):
+    def __init__(self, task, execution_date, state=None, job=None):
         self.dag_id = task.dag_id
         self.task_id = task.task_id
         self.execution_date = execution_date
+        self.state = state
         self.task = task
         self.try_number = 1
         self.unixname = getpass.getuser()
@@ -723,7 +709,6 @@ class TaskInstance(Base):
             if self.task.dag.user_defined_macros:
                 jinja_context.update(
                     self.task.dag.user_defined_macros)
-
         for attr in task.__class__.template_fields:
             result = getattr(task, attr)
             template = self.task.get_template(attr)
@@ -1170,6 +1155,9 @@ class DAG(Base):
             default_args=None,
             params=None):
 
+        self.user_defined_macros = user_defined_macros
+        self.default_args = default_args or {}
+        self.params = params
         utils.validate_key(dag_id)
         self.tasks = []
         self.dag_id = dag_id
@@ -1180,9 +1168,6 @@ class DAG(Base):
         if isinstance(template_searchpath, basestring):
             template_searchpath = [template_searchpath]
         self.template_searchpath = template_searchpath
-        self.user_defined_macros = user_defined_macros
-        self.default_args = default_args or {}
-        self.params = params
         self.parent_dag = None  # Gets set when DAGs are loaded
 
     def __repr__(self):
@@ -1217,6 +1202,17 @@ class DAG(Base):
         session.commit()
         session.close()
         return execution_date
+
+    @property
+    def subdags(self):
+        # Late import to prevent circular imports
+        from airflow.operators import SubDagOperator
+        l = []
+        for task in self.tasks:
+            if isinstance(task, SubDagOperator):
+                l.append(task.subdag)
+                l += task.subdag.subdags
+        return l
 
     def resolve_template_files(self):
         for t in self.tasks:
@@ -1285,10 +1281,11 @@ class DAG(Base):
 
     def clear(
             self, start_date=None, end_date=None,
-            upstream=False, downstream=False,
             only_failed=False,
             only_running=False,
-            confirm_prompt=False):
+            confirm_prompt=False,
+            include_subdags=True,
+            dry_run=False):
         session = settings.Session()
         """
         Clears a set of task instances associated with the current dag for
@@ -1296,8 +1293,18 @@ class DAG(Base):
         """
 
         TI = TaskInstance
-        tis = session.query(TI).filter(TI.dag_id == self.dag_id)
-        tis = tis.filter(TI.task_id.in_(self.task_ids))
+        tis = session.query(TI)
+        if include_subdags:
+            # Creafting the right filter for dag_id and task_ids combo
+            conditions = []
+            for dag in self.subdags + [self]:
+                conditions.append(
+                    TI.dag_id.like(dag.dag_id) & TI.task_id.in_(dag.task_ids)
+                )
+            tis = tis.filter(or_(*conditions))
+        else:
+            tis = session.query(TI).filter(TI.dag_id == self.dag_id)
+            tis = tis.filter(TI.task_id.in_(self.task_ids))
 
         if start_date:
             tis = tis.filter(TI.execution_date >= start_date)
@@ -1307,6 +1314,11 @@ class DAG(Base):
             tis = tis.filter(TI.state == State.FAILED)
         if only_running:
             tis = tis.filter(TI.state == State.RUNNING)
+
+        if dry_run:
+            tis = tis.all()
+            session.expunge_all()
+            return tis
 
         count = tis.count()
         if count == 0:
@@ -1330,6 +1342,20 @@ class DAG(Base):
         session.close()
         return count
 
+    def __deepcopy__(self, memo):
+        # Swiwtcharoo to go around deepcopying objects coming through the
+        # backdoor
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            if k not in ('user_defined_macros', 'params'):
+                setattr(result, k, copy.deepcopy(v, memo))
+
+        result.user_defined_macros = self.user_defined_macros
+        result.params = self.params
+        return result
+
     def sub_dag(
             self, task_regex,
             include_downstream=False, include_upstream=True):
@@ -1339,15 +1365,7 @@ class DAG(Base):
         upstream and downstream neighboors based on the flag passed.
         """
 
-        # Swiwtcharoo to go around deepcopying objects coming through the
-        # backdoor
-        user_defined_macros = self.user_defined_macros
-        params = self.params
-        delattr(self, 'user_defined_macros')
-        delattr(self, 'params')
         dag = copy.deepcopy(self)
-        self.user_defined_macros = user_defined_macros
-        self.params = params
 
         regex_match = [
             t for t in dag.tasks if re.findall(task_regex, t.task_id)]
@@ -1433,7 +1451,8 @@ class DAG(Base):
 
     def run(
             self, start_date=None, end_date=None, mark_success=False,
-            include_adhoc=False, local=False, executor=None):
+            include_adhoc=False, local=False, executor=None,
+            donot_pickle=False):
         from airflow.jobs import BackfillJob
         if not executor and local:
             executor = LocalExecutor()
@@ -1445,7 +1464,8 @@ class DAG(Base):
             end_date=end_date,
             mark_success=mark_success,
             include_adhoc=include_adhoc,
-            executor=executor)
+            executor=executor,
+            donot_pickle=donot_pickle)
         job.run()
 
 
@@ -1472,6 +1492,9 @@ class Chart(Base):
     iteration_no = Column(Integer, default=0)
     last_modified = Column(DateTime, default=datetime.now())
 
+    def __repr__(self):
+        return self.label
+
 
 class KnownEventType(Base):
     __tablename__ = "known_event_type"
@@ -1481,6 +1504,7 @@ class KnownEventType(Base):
 
     def __repr__(self):
         return self.know_event_type
+
 
 class KnownEvent(Base):
     __tablename__ = "known_event"
@@ -1494,5 +1518,10 @@ class KnownEvent(Base):
     reported_by = relationship(
         "User", cascade=False, cascade_backrefs=False, backref='known_events')
     event_type = relationship(
-        "KnownEventType", cascade=False, cascade_backrefs=False, backref='known_events')
+        "KnownEventType",
+        cascade=False,
+        cascade_backrefs=False, backref='known_events')
     description = Column(Text)
+
+    def __repr__(self):
+        return self.label

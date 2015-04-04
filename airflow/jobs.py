@@ -224,7 +224,7 @@ class MasterJob(BaseJob):
                 ti = TI(task, task.start_date)
                 ti.refresh_from_db()
                 if ti.is_runnable():
-                    logging.debug(
+                    logging.info(
                         'First run for {ti}'.format(**locals()))
                     cmd = ti.command(local=True)
                     executor.queue_command(ti.key, cmd)
@@ -275,7 +275,6 @@ class MasterJob(BaseJob):
         logging.basicConfig(level=logging.DEBUG)
         logging.info("Starting a master scheduler")
 
-
         # This should get new code
         dagbag = models.DagBag(self.subdir)
         executor = dagbag.executor
@@ -285,7 +284,11 @@ class MasterJob(BaseJob):
             i += 1
             self.heartbeat()
             dagbag.collect_dags(only_if_updated=True)
-            dags = [dagbag.dags[dag_id]] if dag_id else dagbag.dags.values()
+            if dag_id:
+                dags = [dagbag.dags[dag_id]]
+            else:
+                dags = [
+                    dag for dag in dagbag.dags.values() if not dag.parent_dag]
             paused_dag_ids = dagbag.paused_dags()
             for dag in dags:
                 if dag.dag_id in paused_dag_ids:
@@ -316,6 +319,7 @@ class BackfillJob(BaseJob):
             self,
             dag, start_date=None, end_date=None, mark_success=False,
             include_adhoc=False,
+            donot_pickle=False,
             *args, **kwargs):
         self.dag = dag
         dag.override_start_date(start_date)
@@ -324,6 +328,7 @@ class BackfillJob(BaseJob):
         self.bf_end_date = end_date
         self.mark_success = mark_success
         self.include_adhoc = include_adhoc
+        self.donot_pickle = donot_pickle
         super(BackfillJob, self).__init__(*args, **kwargs)
 
     def _execute(self):
@@ -337,7 +342,7 @@ class BackfillJob(BaseJob):
 
         # picklin'
         pickle_id = None
-        if self.executor.__class__ not in (
+        if not self.donot_pickle and self.executor.__class__ not in (
                 executors.LocalExecutor, executors.SequentialExecutor):
             pickle = models.DagPickle(self.dag)
             session.add(pickle)

@@ -1,19 +1,33 @@
-from bash_operator import BashOperator
-from python_operator import PythonOperator
-from mysql_operator import MySqlOperator
-from postgres_operator import PostgresOperator
-from hive_operator import HiveOperator
-from presto_check_operator import PrestoCheckOperator
-from presto_check_operator import PrestoIntervalCheckOperator
-from presto_check_operator import PrestoValueCheckOperator
-from sensors import SqlSensor
-from sensors import ExternalTaskSensor
-from sensors import HivePartitionSensor
-from sensors import HdfsSensor
-from sensors import S3KeySensor
-from sensors import S3PrefixSensor
-from sensors import TimeSensor
-from email_operator import EmailOperator
-from dummy_operator import DummyOperator
-from hive2samba_operator import Hive2SambaOperator
-from subdag_operator import SubDagOperator
+'''
+Imports operators dynamically while keeping the package API clean,
+abstracting the underlying modules
+'''
+from airflow.utils import import_module_attrs as _import_module_attrs
+
+_operators = {
+    'bash_operator': ['BashOperator'],
+    'python_operator': ['PythonOperator'],
+    'hive_operator': ['HiveOperator'],
+    'presto_check_operator': [
+        'PrestoCheckOperator',
+        'PrestoValueCheckOperator',
+        'PrestoIntervalCheckOperator',
+    ],
+    'dummy_operator': ['DummyOperator'],
+    'email_operator': ['EmailOperator'],
+    'hive2samba_operator': ['Hive2SambaOperator'],
+    'mysql_operator': ['MySqlOperator'],
+    'postgres_operator': ['PostgresOperator'],
+    'sensors': [
+        'SqlSensor',
+        'ExternalTaskSensor',
+        'HivePartitionSensor',
+        'S3KeySensor',
+        'S3PrefixSensor',
+        'HdfsSensor',
+        'TimeSensor',
+    ],
+    'subdag_operator': ['SubDagOperator'],
+    }
+
+_import_module_attrs(globals(), _operators)

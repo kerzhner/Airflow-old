@@ -148,10 +148,10 @@ class WebUiTests(unittest.TestCase):
         assert "example_bash_operator" in response.data
 
     def test_query(self):
-        response = self.app.get('/admin/airflow/query')
+        response = self.app.get('/admin/queryview/')
         assert "Ad Hoc Query" in response.data
         response = self.app.get(
-            "/admin/airflow/query?"
+            "/admin/queryview/?"
             "conn_id=presto_default&"
             "sql=SELECT+COUNT%281%29+FROM+airflow.static_babynames")
         assert "Ad Hoc Query" in response.data
@@ -169,19 +169,19 @@ class WebUiTests(unittest.TestCase):
         assert "runme_0" in response.data
         response = self.app.get(
             '/admin/airflow/duration?days=30&dag_id=example_bash_operator')
-        assert "DAG: example_bash_operator" in response.data
+        assert "example_bash_operator" in response.data
         response = self.app.get(
             '/admin/airflow/landing_times?'
             'days=30&dag_id=example_bash_operator')
-        assert "DAG: example_bash_operator" in response.data
+        assert "example_bash_operator" in response.data
         response = self.app.get(
             '/admin/airflow/gantt?dag_id=example_bash_operator')
-        assert "DAG: example_bash_operator" in response.data
+        assert "example_bash_operator" in response.data
         response = self.app.get(
             '/admin/airflow/code?dag_id=example_bash_operator')
-        assert "DAG: example_bash_operator" in response.data
+        assert "example_bash_operator" in response.data
         response = self.app.get(
-            '/admin/airflow/conf')
+            '/admin/configurationview/')
         assert "Airflow Configuration" in response.data
         response = self.app.get(
             '/admin/airflow/rendered?'
@@ -191,9 +191,11 @@ class WebUiTests(unittest.TestCase):
         response = self.app.get(
             '/admin/airflow/log?task_id=run_this_last&'
             'dag_id=example_bash_operator&execution_date=2015-01-01T00:00:00')
-        assert "Logs for run_this_last on 2015-01-01T00:00:00" in response.data
+        assert "run_this_last" in response.data
         response = self.app.get(
-            '/admin/airflow/task?task_id=runme_0&dag_id=example_bash_operator')
+            '/admin/airflow/task?'
+            'task_id=runme_0&dag_id=example_bash_operator&'
+            'execution_date=2015-01-01')
         assert "Attributes" in response.data
         response = self.app.get(
             '/admin/airflow/dag_stats')
@@ -225,48 +227,57 @@ class WebUiTests(unittest.TestCase):
     def tearDown(self):
         pass
 
+if 'MySqlOperator' in dir(operators):
+    # Only testing if the operator is installed
+    class MySqlTest(unittest.TestCase):
 
-class MySqlTest(unittest.TestCase):
+        def setUp(self):
+            configuration.test_mode()
+            utils.initdb()
+            args = {'owner': 'airflow', 'start_date': datetime(2015, 1, 1)}
+            dag = DAG('hive_test', default_args=args)
+            self.dag = dag
 
-    def setUp(self):
-        configuration.test_mode()
-        utils.initdb()
-        args = {'owner': 'airflow', 'start_date': datetime(2015, 1, 1)}
-        dag = DAG('hive_test', default_args=args)
-        self.dag = dag
+        def mysql_operator_test(self):
+            sql = """
+            CREATE TABLE IF NOT EXISTS test_airflow (
+                dummy VARCHAR(50)
+            );
+            """
+            t = operators.MySqlOperator(
+                task_id='basic_mysql', sql=sql, dag=self.dag)
+            t.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, force=True)
 
-    def mysql_operator_test(self):
-        sql = """
-        CREATE TABLE IF NOT EXISTS test_airflow (
-            dummy VARCHAR(50)
-        );
-        """
-        t = operators.MySqlOperator(
-            task_id='basic_mysql', sql=sql, dag=self.dag)
-        t.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, force=True)
+if 'PostgresOperator' in dir(operators):
+    # Only testing if the operator is installed
+    class PostgresTest(unittest.TestCase):
 
-class PostgresTest(unittest.TestCase):
+        def setUp(self):
+            configuration.test_mode()
+            utils.initdb()
+            args = {'owner': 'airflow', 'start_date': datetime(2015, 1, 1)}
+            dag = DAG('hive_test', default_args=args)
+            self.dag = dag
 
-    def setUp(self):
-        configuration.test_mode()
-        utils.initdb()
-        args = {'owner': 'airflow', 'start_date': datetime(2015, 1, 1)}
-        dag = DAG('hive_test', default_args=args)
-        self.dag = dag
+        def postgres_operator_test(self):
+            sql = """
+            CREATE TABLE IF NOT EXISTS test_airflow (
+                dummy VARCHAR(50)
+            );
+            """
+            t = operators.PostgresOperator(
+                task_id='basic_postgres', sql=sql, dag=self.dag)
+            t.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, force=True)
 
-    def postgres_operator_test(self):
-        sql = """
-        CREATE TABLE IF NOT EXISTS test_airflow (
-            dummy VARCHAR(50)
-        );
-        """
-        t = operators.PostgresOperator(
-            task_id='basic_postgres', sql=sql, dag=self.dag)
-        t.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, force=True)
-
-        autocommitTask = operators.PostgresOperator(
-            task_id='basic_postgres_with_autocommit', sql=sql, dag=self.dag, autocommit=True)
-        autocommitTask.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, force=True)
+            autocommitTask = operators.PostgresOperator(
+                task_id='basic_postgres_with_autocommit',
+                sql=sql,
+                dag=self.dag,
+                autocommit=True)
+            autocommitTask.run(
+                start_date=DEFAULT_DATE,
+                end_date=DEFAULT_DATE,
+                force=True)
 
 
 if __name__ == '__main__':
