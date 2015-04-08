@@ -63,6 +63,7 @@ def superuser_required(f):
             return redirect(url_for('admin.index'))
     return decorated_function
 
+
 def data_profiling_required(f):
     '''
     Decorator for views requiring data profiling access
@@ -620,7 +621,7 @@ class Airflow(BaseView):
                 )
             else:
                 html_dict[template_field] = (
-                    "<pre><code>" + content + "</pre></code>")
+                    "<pre><code>" + str(content) + "</pre></code>")
 
         return self.render(
             'airflow/ti_code.html',
@@ -797,8 +798,8 @@ class Airflow(BaseView):
                     for t in task.get_flat_relatives(upstream=True)]
             TI = models.TaskInstance
             tis = session.query(TI).filter(
-                TI.dag_id==dag_id,
-                TI.execution_date==execution_date,
+                TI.dag_id == dag_id,
+                TI.execution_date == execution_date,
                 TI.task_id.in_(task_ids)).all()
 
             if confirmed:
@@ -851,6 +852,7 @@ class Airflow(BaseView):
     @wwwutils.gzipped
     def tree(self):
         dag_id = request.args.get('dag_id')
+        blur = request.args.get('blur') == 'true'
         dag = dagbag.dags[dag_id]
         root = request.args.get('root')
         if root:
@@ -934,13 +936,14 @@ class Airflow(BaseView):
 
         return self.render(
             'airflow/tree.html',
-            dag=dag, data=data)
+            dag=dag, data=data, blur=blur)
 
     @expose('/graph')
     @login_required
     def graph(self):
         session = settings.Session()
         dag_id = request.args.get('dag_id')
+        blur = request.args.get('blur') == 'true'
         arrange = request.args.get('arrange', "LR")
         if dag_id not in dagbag.dags:
             flash('DAG "{0}" seems to be missing.'.format(dag_id), "error")
@@ -1006,6 +1009,7 @@ class Airflow(BaseView):
             form=form,
             execution_date=dttm.isoformat(),
             arrange=arrange,
+            blur=blur,
             task_instances=json.dumps(task_instances, indent=2),
             tasks=json.dumps(tasks, indent=2),
             nodes=json.dumps(nodes, indent=2),
@@ -1040,7 +1044,8 @@ class Airflow(BaseView):
             'airflow/chart.html',
             dag=dag,
             data=all_data,
-            height="500px",
+            chart_options={'yAxis': {'title': {'text': 'hours'}}},
+            height="700px",
         )
 
     @expose('/landing_times')
@@ -1073,7 +1078,8 @@ class Airflow(BaseView):
             'airflow/chart.html',
             dag=dag,
             data=all_data,
-            height="500px",
+            height="700px",
+            chart_options={'yAxis': {'title': {'text': 'hours after 00:00'}}},
         )
 
     @expose('/gantt')
@@ -1150,8 +1156,10 @@ admin.add_view(Airflow(name='DAGs'))
 class LoginMixin(object):
     def is_accessible(self):
         return (
-            not AUTHENTICATE or
-            (not current_user.is_anonymous() and current_user.is_authenticated())
+            not AUTHENTICATE or (
+                not current_user.is_anonymous() and
+                current_user.is_authenticated()
+            )
         )
 
 
@@ -1315,6 +1323,7 @@ admin.add_view(mv)
 
 
 class ConnectionModelView(SuperUserMixin, ModelView):
+    column_default_sort = ('conn_id', False)
     column_list = ('conn_id', 'conn_type', 'host', 'port')
     form_choices = {
         'conn_type': [
