@@ -24,10 +24,3 @@ def ds_add(ds, days):
     if days:
         ds = ds + timedelta(days)
     return ds.isoformat()[:10]
-
-def dt_delta_hour(dt, delta_hour):
-    new_dt = dt + timedelta(hours=delta_hour)
-    return new_dt
-
-def dt_string(dt, format):
-    return dt.strftime(format)
